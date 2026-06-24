@@ -14,7 +14,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 # --- JWT settings ---
-SECRET_KEY = "dev-secret-change-this-in-production"  # we'll talk about this below
+SECRET_KEY = "dev-secret-change-this-in-production"  
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
