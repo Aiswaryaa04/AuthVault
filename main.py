@@ -2,11 +2,12 @@ from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from models import User, RefreshToken
+import pyotp
 
 from database import engine, Base, get_db
 from models import User
 from schemas import UserCreate, UserOut, Token
-from auth import hash_password, verify_password, create_access_token, decode_access_token, create_refresh_token
+from auth import hash_password, verify_password, create_access_token, decode_access_token, create_refresh_token, generate_mfa_secret, verify_totp_code
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
@@ -101,3 +102,25 @@ def read_current_user(current_user: User = Depends(get_current_user)):
 @app.get("/admin-only")
 def admin_route(current_user: User = Depends(require_role("admin"))):
     return {"message": f"Welcome, admin {current_user.email}"}
+
+# --- MFA Setup ---
+@app.post("/mfa/setup")
+def setup_mfa(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    secret = generate_mfa_secret()
+    current_user.mfa_secret = secret
+    current_user.mfa_enabled = True
+    db.commit()
+
+    totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(
+        name=current_user.email, issuer_name="AuthVault"
+    )
+    return {"secret": secret, "qr_uri": totp_uri}
+
+# --- MFA Verify ---
+@app.post("/mfa/verify")
+def verify_mfa(code: str = Body(..., embed=True), current_user: User = Depends(get_current_user)):
+    if not current_user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="MFA not enabled for this user")
+    if not verify_totp_code(current_user.mfa_secret, code):
+        raise HTTPException(status_code=401, detail="Invalid MFA code")
+    return {"message": "MFA code verified successfully"}

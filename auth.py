@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import secrets
+import pyotp
 
 # --- Password hashing ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -33,3 +34,10 @@ def decode_access_token(token: str):
     
 def create_refresh_token():
     return secrets.token_urlsafe(32)
+
+def generate_mfa_secret():
+    return pyotp.random_base32()
+
+def verify_totp_code(secret: str, code: str) -> bool:
+    totp = pyotp.TOTP(secret)
+    return totp.verify(code)
