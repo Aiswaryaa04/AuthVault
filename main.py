@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import pyotp
 
+from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base, get_db, redis_client
 from models import User, RefreshToken, AuditLog
 from schemas import UserCreate, UserOut, Token
@@ -16,6 +17,14 @@ from auth import (
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="AuthVault")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
