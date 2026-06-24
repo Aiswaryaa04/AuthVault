@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from models import User, RefreshToken
+from models import User, RefreshToken, AuditLog
 import pyotp
 
 from database import engine, Base, get_db
@@ -30,6 +30,9 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+
+    log_event(db, new_user.id, "signup", f"New user registered: {new_user.email}")
+
     return new_user
 
 # --- Login ---
@@ -37,6 +40,8 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
+        log_event(db, user.id if user else None, "login_failed", f"Failed login attempt for {form_data.username}")
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
@@ -48,6 +53,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     db_refresh = RefreshToken(token=refresh_token_str, user_id=user.id)
     db.add(db_refresh)
     db.commit()
+
+    log_event(db, user.id, "login_success", f"User logged in: {user.email}")
 
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token_str}
 
@@ -86,6 +93,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+def log_event(db: Session, user_id: int | None, event_type: str, detail: str = ""):
+    entry = AuditLog(user_id=user_id, event_type=event_type, detail=detail)
+    db.add(entry)
+    db.commit()
 
 def require_role(required_role: str):
     def role_checker(current_user: User = Depends(get_current_user)):

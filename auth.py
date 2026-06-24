@@ -41,3 +41,4 @@ def generate_mfa_secret():
 def verify_totp_code(secret: str, code: str) -> bool:
     totp = pyotp.TOTP(secret)
     return totp.verify(code)
+
