@@ -1,11 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from models import User, RefreshToken
 
 from database import engine, Base, get_db
 from models import User
 from schemas import UserCreate, UserOut, Token
-from auth import hash_password, verify_password, create_access_token, decode_access_token
+from auth import hash_password, verify_password, create_access_token, decode_access_token, create_refresh_token
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
@@ -41,7 +42,37 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         )
 
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token_str = create_refresh_token()
+
+    db_refresh = RefreshToken(token=refresh_token_str, user_id=user.id)
+    db.add(db_refresh)
+    db.commit()
+
+    return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token_str}
+
+@app.post("/refresh", response_model=Token)
+def refresh_token(refresh_token: str = Body(..., embed=True), db: Session = Depends(get_db)):
+    db_token = db.query(RefreshToken).filter(
+        RefreshToken.token == refresh_token,
+        RefreshToken.revoked == False
+    ).first()
+
+    if not db_token:
+        raise HTTPException(status_code=401, detail="Invalid or revoked refresh token")
+
+    # Rotation: revoke the old one, issue a new pair
+    db_token.revoked = True
+    db.commit()
+
+    user = db.query(User).filter(User.id == db_token.user_id).first()
+    new_access_token = create_access_token(data={"sub": user.email})
+    new_refresh_token_str = create_refresh_token()
+
+    new_db_refresh = RefreshToken(token=new_refresh_token_str, user_id=user.id)
+    db.add(new_db_refresh)
+    db.commit()
+
+    return {"access_token": new_access_token, "token_type": "bearer", "refresh_token": new_refresh_token_str}
 
 # --- Dependency: get current user from token ---
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):

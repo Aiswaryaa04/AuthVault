@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import secrets
 
 # --- Password hashing ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -29,3 +30,6 @@ def decode_access_token(token: str):
         return payload
     except JWTError:
         return None
+    
+def create_refresh_token():
+    return secrets.token_urlsafe(32)
