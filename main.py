@@ -1,13 +1,16 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from models import User, RefreshToken, AuditLog
+from datetime import datetime, timedelta
 import pyotp
 
-from database import engine, Base, get_db
-from models import User
+from database import engine, Base, get_db, redis_client
+from models import User, RefreshToken, AuditLog
 from schemas import UserCreate, UserOut, Token
-from auth import hash_password, verify_password, create_access_token, decode_access_token, create_refresh_token, generate_mfa_secret, verify_totp_code
+from auth import (
+    hash_password, verify_password, create_access_token, decode_access_token,
+    create_refresh_token, generate_mfa_secret, verify_totp_code
+)
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
@@ -15,6 +18,33 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="AuthVault")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
+# --- Audit logging helper ---
+def log_event(db: Session, user_id: int | None, event_type: str, detail: str = ""):
+    entry = AuditLog(user_id=user_id, event_type=event_type, detail=detail)
+    db.add(entry)
+    db.commit()
+
+
+# --- Rate limiting helpers (Redis-based) ---
+def check_rate_limit(email: str):
+    key = f"login_attempts:{email}"
+    attempts = redis_client.get(key)
+
+    if attempts and int(attempts) >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Please try again later."
+        )
+
+
+def record_failed_attempt(email: str):
+    key = f"login_attempts:{email}"
+    attempts = redis_client.incr(key)
+    if attempts == 1:
+        redis_client.expire(key, 900)  # 15 minutes
+
 
 # --- Signup ---
 @app.post("/signup", response_model=UserOut)
@@ -32,20 +62,25 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
 
     log_event(db, new_user.id, "signup", f"New user registered: {new_user.email}")
-
     return new_user
+
 
 # --- Login ---
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    check_rate_limit(form_data.username)
+
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         log_event(db, user.id if user else None, "login_failed", f"Failed login attempt for {form_data.username}")
-
+        record_failed_attempt(form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
+
+    # Clear failed-attempt counter on successful login
+    redis_client.delete(f"login_attempts:{form_data.username}")
 
     access_token = create_access_token(data={"sub": user.email})
     refresh_token_str = create_refresh_token()
@@ -55,9 +90,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     db.commit()
 
     log_event(db, user.id, "login_success", f"User logged in: {user.email}")
-
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token_str}
 
+
+# --- Refresh token ---
 @app.post("/refresh", response_model=Token)
 def refresh_token(refresh_token: str = Body(..., embed=True), db: Session = Depends(get_db)):
     db_token = db.query(RefreshToken).filter(
@@ -68,7 +104,6 @@ def refresh_token(refresh_token: str = Body(..., embed=True), db: Session = Depe
     if not db_token:
         raise HTTPException(status_code=401, detail="Invalid or revoked refresh token")
 
-    # Rotation: revoke the old one, issue a new pair
     db_token.revoked = True
     db.commit()
 
@@ -82,6 +117,7 @@ def refresh_token(refresh_token: str = Body(..., embed=True), db: Session = Depe
 
     return {"access_token": new_access_token, "token_type": "bearer", "refresh_token": new_refresh_token_str}
 
+
 # --- Dependency: get current user from token ---
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     payload = decode_access_token(token)
@@ -94,11 +130,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-def log_event(db: Session, user_id: int | None, event_type: str, detail: str = ""):
-    entry = AuditLog(user_id=user_id, event_type=event_type, detail=detail)
-    db.add(entry)
-    db.commit()
 
+# --- Role-based access control ---
 def require_role(required_role: str):
     def role_checker(current_user: User = Depends(get_current_user)):
         if current_user.role != required_role:
@@ -106,14 +139,17 @@ def require_role(required_role: str):
         return current_user
     return role_checker
 
-# --- Protected route ---
+
+# --- Protected routes ---
 @app.get("/me", response_model=UserOut)
 def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
 
+
 @app.get("/admin-only")
 def admin_route(current_user: User = Depends(require_role("admin"))):
     return {"message": f"Welcome, admin {current_user.email}"}
+
 
 # --- MFA Setup ---
 @app.post("/mfa/setup")
@@ -127,6 +163,7 @@ def setup_mfa(current_user: User = Depends(get_current_user), db: Session = Depe
         name=current_user.email, issuer_name="AuthVault"
     )
     return {"secret": secret, "qr_uri": totp_uri}
+
 
 # --- MFA Verify ---
 @app.post("/mfa/verify")
