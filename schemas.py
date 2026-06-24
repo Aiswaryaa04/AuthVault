@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
 class UserOut(BaseModel):
     id: int
     email: EmailStr
+    role: str
     created_at: datetime
 
     class Config:
